@@ -4,11 +4,14 @@ import lms.core.stub._
 import lms.core.virtualize
 import lms.macros.SourceContext
 
+import lms.macros.RefinedManifest
+import lms.collection.mutable._
+
 @virtualize
 class StagedProcInterp1bPC extends TutorialFunSuite {
   val under = "proci1b_staged_"
 
-  val REGFILE_SIZE:Int = 7
+  val REGFILE_SIZE: Int = 7
   val regfile_main = """
     |int main(int argc, char *argv[]) {
     |  int regfile[7] = {0, 0, 0, 0, 0, 0, 0};
@@ -41,7 +44,17 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
     |  return x;
     |}
     |
+    |int init(struct timer *t) {
+    |  t->ticks = 0;
+    |  return 0;
+    |}
+    |
+    |
     |int main(int argc, char *argv[]) {
+    |  struct timer t1;
+    |  struct timer t2;
+    |  init(&t1);
+    |  init(&t2);
     |  int input = bounded(0, 10);
     |  int regfile[11] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     |  int regfile2[11] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0 ,0};
@@ -56,7 +69,6 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
     |  __CPROVER_assert(c1 == c2, "timing leak");
     |""".stripMargin
 
-
     var printexpected = s"""
     |  printf("\\nexpected:\\n");
     |  printf(""""
@@ -65,7 +77,6 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
     }
     printexpected += s""" ");
     |""".stripMargin
-
 
     for (i <- 0 until expected.length) {
       ret += s"""
@@ -101,7 +112,19 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
 
   val DEBUG = true
 
-  trait Interp extends Dsl {
+  @CStruct
+  case class timer(
+      ticks: Int,
+      rf: Array[Int]
+  )
+
+  trait Interp extends Dsl with StructOps {
+
+    @CStructOps
+    abstract class Ptimer[timer](
+        ticks: Int,
+        rf: Array[Int]
+    )
 
     abstract sealed class Instruction
     case class Add(rd: Reg, rs1: Reg, rs2: Reg) extends Instruction
@@ -142,10 +165,8 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
     type |∨|[T, U] = { type λ[X] = ¬¬[X] <:< (T ∨ U) }
     // see https://stackoverflow.com/questions/3508077/how-to-define-type-disjunction-union-types
 
-
     type Program = List[Instruction]
     type RegFile = Array[Int]
-    
 
     case class Reg(id: Int)
     val ZERO: Reg = Reg(0)
@@ -193,7 +214,6 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
         vs.foldLeft(unit(false))((acc, v) => acc || equal(read, unit(v)))
     }
 
-    def println(s: String) = if (DEBUG) Predef.println(s) else ()
 
     def readProgram(file: String): Program = {
       scala.io.Source
@@ -219,9 +239,6 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
         }
         .toList
     }
-
-
-
 
     def expectedResult(prog: Program): Array[Int] = {
       var rf: Array[Int] = new Array[Int](REGFILE_SIZE + 4)
@@ -258,11 +275,16 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
       rf
     }
 
-    def run(prog: Program, state: Rep[RegFile]): Rep[Int] = {
+    def run(prog: Program, state: Rep[timer]): Rep[timer] = {
+      var state_ = state
 
-      var ticks: Var[Int] = __newVar(0)
-      def tick(i: Int): Rep[Unit] = {
-        ticks = readVar(ticks) + i
+      //
+      // def tick(i: Int): Rep[Unit] = {
+      //  ticks = readVar(ticks) + i
+      // }
+      def tick(timer: Rep[timer], i: Int): Rep[timer] = {
+        timer.ticks = timer.ticks + i
+        return timer
       }
 
       def execute(
@@ -286,8 +308,8 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
           else 0
 
         if (op == MulOp) {
-          if (op1 == 0 || op2 == 0) tick(1)
-          else tick(7)
+          if (op1 == 0 || op2 == 0) state_ = tick(state_,1)
+          else state_ = tick(state_,2)
         }
 
         val e_dst = dst
@@ -313,10 +335,8 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
 
       def BPredict(pc: Rep[Int]): Rep[Boolean] = false
 
-
-      val regfile: Rep[RegFile] = state
+      val regfile: Rep[RegFile] = state.rf
       var pc: Port[Int] = new Port[Int](0)
-
 
       var f2e: Map[String, Port[Int]] = Map(
         "dst" -> new Port[Int](0),
@@ -344,7 +364,10 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
         f2e.foreach { case (_, port) => port.update() }
         e2c.foreach { case (_, port) => port.update() }
         pc.update()
-        tick(1)
+        state_ = tick(state_, 1)
+        readVar(state_).ticks = readVar(state_).ticks + 1
+        println(state_)
+
 
         // Commit stage
         if (!e2c("dst").isAmong(0))
@@ -472,7 +495,7 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
           f2e.foreach { case (_, p) => p.flush() }
         }
       }
-      ticks
+      state_
     }
   }
 
@@ -480,7 +503,7 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
     q =>
     val main: String = ""
 
-    override val codegen = new DslGenC {
+    override val codegen = new DslGenC with CCodeGenStruct {
       val IR: q.type = q
 
       override def emitAll(
@@ -516,7 +539,7 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
   }
 
   test("proc 1") {
-    val snippet = new DslDriverX[Array[Int], Int] with Interp {
+    val snippet = new DslDriverX[timer, timer] with Interp {
       val N = A3
       val Temp = A2
       val F_n = A1
@@ -535,7 +558,7 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
       )
       val expected = expectedResult(Fibprog)
       override val main = constructMain(expected)
-      def snippet(initRegFile: Rep[RegFile]) = {
+      def snippet(initRegFile: Rep[timer]) = {
 
         run(Fibprog, initRegFile)
       }
@@ -544,7 +567,7 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
   }
 
   test("proc rar hazard") {
-    val snippet = new DslDriverX[Array[Int], Int] with Interp {
+    val snippet = new DslDriverX[timer, timer] with Interp {
       val prog = List(
         Addi(A1, A0, 1), //
         Addi(A3, A0, 2), // RAR
@@ -552,7 +575,7 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
       )
       val expected = expectedResult(prog)
       override val main = constructMain(expected)
-      def snippet(initRegFile: Rep[RegFile]) = {
+      def snippet(initRegFile: Rep[timer]) = {
         run(prog, initRegFile)
       }
     }
@@ -560,7 +583,7 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
   }
 
   test("proc waw hazard") {
-    val snippet = new DslDriverX[Array[Int], Int] with Interp {
+    val snippet = new DslDriverX[timer, timer] with Interp {
       val prog = List(
         Addi(A0, ZERO, 1),
         Addi(A0, A0, 1), // WAW
@@ -568,7 +591,7 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
       )
       val expected = expectedResult(prog)
       override val main = constructMain(expected)
-      def snippet(initRegFile: Rep[RegFile]) = {
+      def snippet(initRegFile: Rep[timer]) = {
         run(prog, initRegFile)
       }
     }
@@ -576,7 +599,7 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
   }
 
   test("proc raw hazard") {
-    val snippet = new DslDriverX[Array[Int], Int] with Interp {
+    val snippet = new DslDriverX[timer, timer] with Interp {
       val prog = List(
         Addi(A0, ZERO, 1),
         Addi(A1, A0, 1), // RAW
@@ -584,7 +607,7 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
       )
       val expected = expectedResult(prog)
       override val main = constructMain(expected)
-      def snippet(initRegFile: Rep[RegFile]) = {
+      def snippet(initRegFile: Rep[timer]) = {
         run(prog, initRegFile)
       }
     }
@@ -592,7 +615,7 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
   }
 
   test("proc war hazard") {
-    val snippet = new DslDriverX[Array[Int], Int] with Interp {
+    val snippet = new DslDriverX[timer, timer] with Interp {
       val prog = List(
         Addi(A1, A0, 1), //
         Addi(A0, A3, 2), // WAR
@@ -600,7 +623,7 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
       )
       val expected = expectedResult(prog)
       override val main = constructMain(expected)
-      def snippet(initRegFile: Rep[RegFile]) = {
+      def snippet(initRegFile: Rep[timer]) = {
         run(prog, initRegFile)
       }
     }
@@ -608,7 +631,7 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
   }
 
   test("proc annul") {
-    val snippet = new DslDriverX[Array[Int], Int] with Interp {
+    val snippet = new DslDriverX[timer, timer] with Interp {
       val prog = List(
         Addi(A0, ZERO, 1),
         JumpNZ(A0, 2),
@@ -617,7 +640,7 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
       )
       val expected = expectedResult(prog)
       override val main = constructMain(expected)
-      def snippet(initRegFile: Rep[RegFile]) = {
+      def snippet(initRegFile: Rep[timer]) = {
         run(prog, initRegFile)
       }
     }
@@ -625,7 +648,7 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
   }
 
   test("proc loop") {
-    val snippet = new DslDriverX[Array[Int], Int] with Interp {
+    val snippet = new DslDriverX[timer, timer] with Interp {
       val prog = List(
         Addi(A0, ZERO, 3),
         Addi(A0, A0, -1),
@@ -636,7 +659,7 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
       )
       val expected = expectedResult(prog)
       override val main = constructMain(expected)
-      def snippet(initRegFile: Rep[RegFile]) = {
+      def snippet(initRegFile: Rep[timer]) = {
         run(prog, initRegFile)
       }
     }
@@ -644,13 +667,13 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
   }
 
   test("proc hazard") {
-    val snippet = new DslDriverX[Array[Int], Int] with Interp {
+    val snippet = new DslDriverX[timer, timer] with Interp {
       val prog = List(
         Addi(A0, ZERO, 1),
         Add(A1, A0, A0), // RAW
         Add(A2, A1, A0),
         Add(A3, A2, A1),
-        Add(A0, A3, A2), // RAW
+        Add(A0, A3, A2), // RAW  
         Add(A1, A0, A3), // RAW, RAR
         Add(A2, A1, A0), // RAW, RAR
         Add(A3, A2, A1), // RAW, RAR
@@ -658,7 +681,7 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
       )
       val expected = expectedResult(prog)
       override val main = constructMain(expected)
-      def snippet(initRegFile: Rep[RegFile]) = {
+      def snippet(initRegFile: Rep[timer]) = {
         run(prog, initRegFile)
       }
     }
@@ -668,14 +691,14 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
 
   test("proc stress") {
     // read from file 1.asm and get the program
-    val snippet = new DslDriverX[Array[Int], Int] with Interp {
+    val snippet = new DslDriverX[timer, timer] with Interp {
 
       val filename = "src/out/1.asm"
       val program = readProgram(filename)
       val expected: Array[Int] = expectedResult(program)
       override val main = constructMain(expected)
 
-      def snippet(initRegFile: Rep[RegFile]) = {
+      def snippet(initRegFile: Rep[timer]) = {
         run(program, initRegFile)
       }
 
@@ -683,9 +706,8 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
     exec("stress", snippet.code)
   }
 
-
   test("proc mul") {
-    val snippet = new DslDriverX[Array[Int], Int] with Interp {
+    val snippet = new DslDriverX[timer, timer] with Interp {
       val prog = List(
         Mul(SECRET2, SECRET1, A0),
         Addi(A0, ZERO, 1),
@@ -693,11 +715,11 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
         Addi(A2, ZERO, 3),
         Addi(A3, ZERO, 4),
         Addi(A4, ZERO, 5),
-        Addi(A5, ZERO, 6),
+        Addi(A5, ZERO, 6)
       )
       val expected = expectedResult(prog)
       override val main = constructMain(expected)
-      def snippet(initRegFile: Rep[RegFile]) = {
+      def snippet(initRegFile: Rep[timer]) = {
         run(prog, initRegFile)
       }
     }
