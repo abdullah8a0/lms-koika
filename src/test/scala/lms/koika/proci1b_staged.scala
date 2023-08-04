@@ -214,7 +214,6 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
         vs.foldLeft(unit(false))((acc, v) => acc || equal(read, unit(v)))
     }
 
-
     def readProgram(file: String): Program = {
       scala.io.Source
         .fromFile(file)
@@ -282,10 +281,6 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
       // def tick(i: Int): Rep[Unit] = {
       //  ticks = readVar(ticks) + i
       // }
-      def tick(timer: Rep[timer], i: Int): Rep[timer] = {
-        timer.ticks = timer.ticks + i
-        return timer
-      }
 
       def execute(
           f2e: Map[String, Port[Int]]
@@ -307,10 +302,12 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
           else if (op == GeOp) if (op1 >= op2) 1 else 0
           else 0
 
+        /
         if (op == MulOp) {
-          if (op1 == 0 || op2 == 0) state_ = tick(state_,1)
-          else state_ = tick(state_,2)
+          if (op1 == 0 || op2 == 0) state_ = tick(state_)
+          else {state_ = tick(state_)}
         }
+         */
 
         val e_dst = dst
 
@@ -364,10 +361,6 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
         f2e.foreach { case (_, port) => port.update() }
         e2c.foreach { case (_, port) => port.update() }
         pc.update()
-        state_ = tick(state_, 1)
-        readVar(state_).ticks = readVar(state_).ticks + 1
-        println(state_)
-
 
         // Commit stage
         if (!e2c("dst").isAmong(0))
@@ -558,9 +551,17 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
       )
       val expected = expectedResult(Fibprog)
       override val main = constructMain(expected)
+      def tick: Rep[timer => timer] = fun { t =>
+        {
+          var timer = t
+          readVar(timer).ticks = readVar(timer).ticks + 1
+          timer
+        }
+      }
       def snippet(initRegFile: Rep[timer]) = {
 
-        run(Fibprog, initRegFile)
+        val st = run(Fibprog, initRegFile)
+        tick(st)
       }
     }
     exec("1", snippet.code)
@@ -575,6 +576,7 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
       )
       val expected = expectedResult(prog)
       override val main = constructMain(expected)
+
       def snippet(initRegFile: Rep[timer]) = {
         run(prog, initRegFile)
       }
@@ -673,7 +675,7 @@ class StagedProcInterp1bPC extends TutorialFunSuite {
         Add(A1, A0, A0), // RAW
         Add(A2, A1, A0),
         Add(A3, A2, A1),
-        Add(A0, A3, A2), // RAW  
+        Add(A0, A3, A2), // RAW
         Add(A1, A0, A3), // RAW, RAR
         Add(A2, A1, A0), // RAW, RAR
         Add(A3, A2, A1), // RAW, RAR
